@@ -1,0 +1,5 @@
+
+This Export folder is a test location for the launcher executable, folders an files, normally this would be the main program folder.
+See the code for how things are implemented and for instructions and examples, if you want to change things up.
+
+

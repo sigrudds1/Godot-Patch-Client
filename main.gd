@@ -59,6 +59,10 @@ var _decompressing_: bool = false setget _noset
 var _game_name_: String = "Test Game" setget _noset
 var _game_path_: String = "" setget _noset
 var _game_update_ok_: bool = false
+var _game_running_thr_: Thread = Thread.new() setget _noset
+var _game_running_sema_: Semaphore = Semaphore.new() setget _noset
+var _game_running_tmr: float = 1.0
+var _is_game_running_: bool = true
 
 
 func _noset(_void) -> void:
@@ -71,10 +75,13 @@ func _exit_tree() -> void:
 	_decompress_sema_.post()
 # warning-ignore:return_value_discarded
 	_manifest_sema_.post()
+# warning-ignore:return_value_discarded
+	_game_running_sema_.post()
 	m_thread_finished(_connect_thread_)
 	m_thread_finished(_decompress_thread_)
 	m_thread_finished(_manifest_thread_)
 	m_thread_finished(_update_thread_)
+	m_thread_finished(_game_running_thr_)
 
 
 func _ready() -> void:
@@ -87,9 +94,15 @@ func _ready() -> void:
 	var err: int = _decompress_thread_.start(self, "m_decompress_thr", _decompress_thread_)
 	if err != OK:
 		printerr("Decompress thread ERR:", err)
+	
 	err = _manifest_thread_.start(self, "m_manifest_thr", _manifest_thread_)
 	if err != OK:
 		printerr("Decompress thread ERR:", err)
+	
+	err = _game_running_thr_.start(self, "m_game_running_thr")
+	if err != OK:
+		printerr("Game Running thread ERR:", err)
+	
 	err = connect("downloaded", self, "_on_data_downloaded")
 	if err != OK:
 		printerr("Main._ready() - error connecting download signal")
@@ -111,23 +124,14 @@ func _ready() -> void:
 	
 # warning-ignore:return_value_discarded
 	_manifest_sema_.post()
+# warning-ignore:return_value_discarded
+	_game_running_sema_.post()
+
 	_state = Glb.STATE_UPDATE_LAUNCHER
 	_proc_time_sec_ = 0
 
-#var sa: Array = [
-#	"STATE_IDLE",
-#	"STATE_RETRY",
-#	"STATE_UPDATE_LAUNCHER",
-#	"STATE_UPDATE_GAME",
-#	"STATE_WAITING",
-#	"STATE_START_GAME",
-#	"STATE_EXIT"]
-#var ps: int = _state
-func _process(p_delta: float) -> void:
-#	if ps != _state:
-#		print("state changed from:", sa[ps], " to:", sa[_state])
-#		ps = _state
-	
+
+func _physics_process(p_delta: float) -> void:
 	if _decompress_list_.size() > 0 && !_decompressing_:
 		_decompressing_ = true
 # warning-ignore:return_value_discarded
@@ -146,6 +150,7 @@ func _process(p_delta: float) -> void:
 			return
 	
 	_proc_time_sec_ += p_delta
+	_game_running_tmr += p_delta
 	
 	match _state:
 		Glb.STATE_IDLE:
@@ -177,7 +182,11 @@ func _process(p_delta: float) -> void:
 			if _manifest_busy_:
 				_proc_time_sec_ = 0
 				return
-			if m_is_game_running():
+			if _game_running_tmr > 1.0:
+				_game_running_tmr = 0.0
+# warning-ignore:return_value_discarded
+				_game_running_sema_.post()
+			if _is_game_running_:
 				_state = Glb.STATE_IDLE
 				_proc_time_sec_ = 0
 				return
@@ -197,7 +206,11 @@ func _process(p_delta: float) -> void:
 		Glb.STATE_START_GAME:
 			if _proc_time_sec_ > kCheckSrvr_SEC:
 				_state = Glb.STATE_IDLE
-			if m_is_game_running():
+			if _game_running_tmr > 1.0:
+				_game_running_tmr = 0.0
+# warning-ignore:return_value_discarded
+				_game_running_sema_.post()
+			if _is_game_running_:
 				$StartButton.text = "Running"
 				$StartButton.disabled = true
 			else:
@@ -255,9 +268,8 @@ func _on_StartButton_button_up() -> void:
 	else:
 # warning-ignore:return_value_discarded
 		OS.execute(_game_path_, [], false)
-	
-	if !m_is_game_running():
-		printerr("Game Failed to launch")
+# warning-ignore:return_value_discarded
+	_game_running_sema_.post()
 
 
 func _on_warning(p_msg: String) -> void:
@@ -365,21 +377,25 @@ func m_dl() -> void:
 	_downloading_ = false
 
 
-func m_is_game_running() -> bool:
+func m_game_running_thr(_void) -> void:
 	var out: Array = []
-	if Glb.os_name == "X11":
+	while _state < Glb.STATE_EXIT:
 # warning-ignore:return_value_discarded
-		OS.execute("ps", ["auxww"], true, out)
-		return out[0].find(_game_path_) >  -1
-	elif Glb.os_name == "Windows":
+		_game_running_sema_.wait()
+		if Glb.os_name == "X11":
 # warning-ignore:return_value_discarded
-		OS.execute("CMD.exe", ["/C", "wmic process get ExecutablePath"], true, out)
-		return out[0].find(_game_path_) >  -1
-	elif Glb.os_name == "OSX":
-		printerr("OSX not supported")
-	else:
-		printerr("No OS found")
-	return false
+			OS.execute("ps", ["auxww"], true, out)
+			_is_game_running_ =  out[0].find(_game_path_) >  -1
+		elif Glb.os_name == "Windows":
+	# warning-ignore:return_value_discarded
+			OS.execute("CMD.exe", ["/C", "wmic process get ExecutablePath"], true, out)
+			_is_game_running_ =  out[0].find(_game_path_) >  -1
+		elif Glb.os_name == "OSX":
+			printerr("OSX not supported")
+			_is_game_running_ = false
+		else:
+			printerr("No OS found")
+			_is_game_running_ = false
 
 
 func m_is_srvr_conn() -> bool:

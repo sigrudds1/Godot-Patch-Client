@@ -34,9 +34,10 @@ var _decompressed_bytes: int = 0 setget _noset
 
 #private
 var _game_folder_: String = "Game/" setget _noset
+var _game_manifest_fn_: String = "manifest.json" setget _noset
 var _game_exe_: String = "" setget _noset
-var _game_manifest_: Dictionary = {} setget _noset
-var _launcher_manifest_: Dictionary = {} setget _noset
+var _game_filelist_: Dictionary = {} setget _noset
+var _launcher_filelist_: Dictionary = {} setget _noset
 var _launcher_updated_: bool = false setget _noset
 
 var _manifest_thread_: Thread = Thread.new() setget _noset
@@ -58,10 +59,11 @@ var _decompressing_: bool = false setget _noset
 
 var _game_name_: String = "Test Game" setget _noset
 var _game_path_: String = "" setget _noset
-var _game_update_ok_: bool = false
+var _game_update_start_: bool = false
 var _game_running_thr_: Thread = Thread.new() setget _noset
 var _game_running_sema_: Semaphore = Semaphore.new() setget _noset
 var _game_running_tmr: float = 1.0
+var _is_game_runnable_: bool = false
 var _is_game_running_: bool = true
 
 
@@ -126,20 +128,36 @@ func _ready() -> void:
 	_manifest_sema_.post()
 # warning-ignore:return_value_discarded
 	_game_running_sema_.post()
-
+	
 	_state = Glb.STATE_UPDATE_LAUNCHER
 	_proc_time_sec_ = 0
 
 
 func _physics_process(p_delta: float) -> void:
+	_is_game_runnable_ = _is_game_runnable_ && !_is_game_running_
+	if (_decompress_list_.size() > 0 || _decompressing_ || _downloading_):
+		$StartButton.set_text("Updating")
+		$StartButton.disabled = true
+	else:
+		if _is_game_runnable_:
+			$StartButton.set_text("Play")
+			$StartButton.disabled = false
+		else:
+			$StartButton.set_text("Missing Files")
+			$StartButton.disabled = true
+	
 	if _decompress_list_.size() > 0 && !_decompressing_:
 		_decompressing_ = true
 # warning-ignore:return_value_discarded
 		_decompress_sema_.post()
 		if _state == Glb.STATE_UPDATE_LAUNCHER:
 			_launcher_updated_ = true
-	
-	if _downloading_ || _manifest_busy_:
+		
+	if _downloading_:
+		return
+	if _manifest_busy_:
+		$StartButton.set_text("Checking Files")
+		$StartButton.disabled = true
 		return
 	
 	if _launcher_updated_:
@@ -194,11 +212,11 @@ func _physics_process(p_delta: float) -> void:
 				_tcp_peer_ = Net.tcp_disconnect(_tcp_peer_)
 				_state = Glb.STATE_RETRY
 				_proc_time_sec_ = 0
-		Glb.STATE_WAITING:
-			if _game_update_ok_:
+		Glb.STATE_DL_WAITING:
+			if _game_update_start_:
 				_state = Glb.STATE_UPDATE_GAME
 			else:
-				$StartButton.text = "Update" 
+				$StartButton.text = "Start Update" 
 				$StartButton.disabled = false
 				if _proc_time_sec_ > kCheckSrvr_SEC:
 					_state = Glb.STATE_IDLE
@@ -210,12 +228,6 @@ func _physics_process(p_delta: float) -> void:
 				_game_running_tmr = 0.0
 # warning-ignore:return_value_discarded
 				_game_running_sema_.post()
-			if _is_game_running_:
-				$StartButton.text = "Running"
-				$StartButton.disabled = true
-			else:
-				$StartButton.text = "Play"
-				$StartButton.disabled = false
 		_:
 			pass
 	
@@ -246,8 +258,8 @@ func _on_decompressed(p_bytes: int) -> void:
 
 func _on_StartButton_button_up() -> void:
 	$StartButton.disabled = true
-	if _state == Glb.STATE_WAITING:
-		_game_update_ok_ = true
+	if _state == Glb.STATE_DL_WAITING:
+		_game_update_start_ = true
 		return
 	
 	#TODO do MacOS
@@ -303,7 +315,7 @@ func m_decompress_thr(p_this_thread: Thread) -> void:
 		if _downloading_:
 			$DecompressFileName.text = "Waiting..."
 		else:
-			$DecompressFileName.text = ""
+			$DecompressFileName.text = "Done"
 			
 		_decompressing_ = false
 	call_deferred("m_thread_finished", p_this_thread)
@@ -338,8 +350,6 @@ func m_dl() -> void:
 				continue
 			
 			$DownloadFileName.text = "Downloading " + d.file.get_file()
-			$StartButton.text = "Downloading"
-			$StartButton.disabled = true
 			
 			var dl_bytes: int = Net.tcp_rcv_file(_tcp_peer_, fp, max_pkt_tm, 
 				self, "downloaded")
@@ -382,20 +392,34 @@ func m_game_running_thr(_void) -> void:
 	while _state < Glb.STATE_EXIT:
 # warning-ignore:return_value_discarded
 		_game_running_sema_.wait()
+		
+		var folder: String = Glb.exe_dir + _game_folder_
+		var manifest: Dictionary = FileTool.read_json(folder + _game_manifest_fn_)
+		var all_found: bool = true
+		if manifest.keys().size() > 0:
+			if manifest.has("filelist"):
+				if typeof(manifest.filelist) == TYPE_ARRAY:
+					print("filelist:", manifest.filelist)
+					var d: Directory = Directory.new()
+					for f in manifest.filelist:
+						all_found = all_found && d.file_exists(folder + f)
+		print("all_found:", all_found)
 		if Glb.os_name == "X11":
 # warning-ignore:return_value_discarded
 			OS.execute("ps", ["auxww"], true, out)
 			_is_game_running_ =  out[0].find(_game_path_) >  -1
 		elif Glb.os_name == "Windows":
-	# warning-ignore:return_value_discarded
+# warning-ignore:return_value_discarded
 			OS.execute("CMD.exe", ["/C", "wmic process get ExecutablePath"], true, out)
 			_is_game_running_ =  out[0].find(_game_path_) >  -1
 		elif Glb.os_name == "OSX":
 			printerr("OSX not supported")
-			_is_game_running_ = false
+			_is_game_running_ = true
 		else:
 			printerr("No OS found")
-			_is_game_running_ = false
+			_is_game_running_ = true
+	
+		_is_game_runnable_ = all_found && !_is_game_running_
 
 
 func m_is_srvr_conn() -> bool:
@@ -416,19 +440,19 @@ func m_manifest_thr(p_this_thread: Thread) -> void:
 		if _state == Glb.STATE_EXIT:
 			break
 		_manifest_busy_ = true
-		_game_manifest_ = {}
-		_launcher_manifest_ = {}
+		_game_filelist_ = {}
+		_launcher_filelist_ = {}
 		#First all the files/folders, in the main folder
 		var files: Array = FileTool.get_paths(Glb.exe_dir, true)
 		for f in files:
 			if f.begins_with(_game_folder_):
-				_game_manifest_[f] = {}
-				_game_manifest_[f]["md5hash"] = FileTool.get_file_md5(Glb.exe_dir + f)
+				_game_filelist_[f] = {}
+				_game_filelist_[f]["md5hash"] = FileTool.get_file_md5(Glb.exe_dir + f)
 			elif f.begins_with("AddOns/"): #Folder exlusion example
 				pass
 			else: #The rest are launcher folders/files
-				_launcher_manifest_[f] = {}
-				_launcher_manifest_[f]["md5hash"] = FileTool.get_file_md5(Glb.exe_dir + f)
+				_launcher_filelist_[f] = {}
+				_launcher_filelist_[f]["md5hash"] = FileTool.get_file_md5(Glb.exe_dir + f)
 		
 		_manifest_busy_ = false
 	
@@ -451,8 +475,10 @@ func m_srvr_conn() -> int:
 	_tcp_peer_ = Net.tcp_connect(_url, _port, kConnTimeout_MS)
 	if _tcp_peer_ ==  null:
 		return ERR_CANT_CONNECT
-	else:
+	elif _tcp_peer_.get_status() != _tcp_peer_.STATUS_CONNECTED:
 		return ERR_CANT_CONNECT
+	
+	return OK
 
 
 func m_srvr_conn_thr(p_this_thread: Thread) -> void:
@@ -483,6 +509,7 @@ func m_update_start() -> int:
 func m_update_thr(p_this_thread: Thread) -> void:
 	if !m_is_srvr_conn():
 		if m_srvr_conn() != OK:
+			$DownloadFileName.text = "Cannot connect to the patch server."
 			_state = Glb.STATE_RETRY
 			_proc_time_sec_ = 0
 			call_deferred("m_thread_finished", p_this_thread)
@@ -491,13 +518,13 @@ func m_update_thr(p_this_thread: Thread) -> void:
 	var out: Dictionary = {
 			"func": Glb.FUNC_UPDATE_LAUNCHER,
 			"os": Glb.os_name,
-			"manifest": _launcher_manifest_
+			"manifest": _launcher_filelist_
 			}
 	if _state == Glb.STATE_UPDATE_LAUNCHER:
 		pass
 	elif _state == Glb.STATE_UPDATE_GAME:
 		out["func"] = Glb.FUNC_UPDATE_GAME
-		out["manifest"] = _game_manifest_
+		out["manifest"] = _game_filelist_
 	else:
 		out["func"] = Glb.FUNC_QUIT
 	if m_is_srvr_conn():
@@ -512,20 +539,21 @@ func m_update_thr(p_this_thread: Thread) -> void:
 			if _state == Glb.STATE_UPDATE_LAUNCHER:
 				m_dl()
 			elif _state == Glb.STATE_UPDATE_GAME:
-				if _game_update_ok_:
+				if _game_update_start_:
 					m_dl()
 				else:
 					out["func"] = Glb.FUNC_TOTAL_BYTES
 					out["status"] = Glb.STATUS_DONE
 					_tcp_peer_.put_var(out)
-					_state = Glb.STATE_WAITING
+					_proc_time_sec_ = 0
+					_state = Glb.STATE_DL_WAITING
 		elif Utils.dict_has_key_val(d, {"func": Glb.FUNC_TOTAL_BYTES, 
 				"status": Glb.STATUS_DONE}):
 			if _state == Glb.STATE_UPDATE_LAUNCHER:
 				_state = Glb.STATE_UPDATE_GAME
 			elif _state == Glb.STATE_UPDATE_GAME:
 				_state = Glb.STATE_START_GAME
-				_game_update_ok_ = true
+				_game_update_start_ = true
 		else:
 			_tcp_peer_ = Net.tcp_disconnect(_tcp_peer_)
 			_state = Glb.STATE_RETRY
